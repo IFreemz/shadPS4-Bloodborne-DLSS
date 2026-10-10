@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -12,6 +13,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -45,7 +47,52 @@ VideoOutDriver::VideoOutDriver(u32 width, u32 height) {
     main_port.resolution.full_height = height;
     main_port.resolution.pane_width = width;
     main_port.resolution.pane_height = height;
+    swap_thread = std::jthread([&](std::stop_token token) { SwapThread(token); });
     present_thread = std::jthread([&](std::stop_token token) { PresentThread(token); });
+}
+
+bool VideoOutDriver::UseSwapThread() const {
+    // Bloodborne threaded renderer only, and not with frame generation (its present pacing
+    // runs on the vblank thread). SHADPS4_BB_PRESENT_THREAD=0 turns it off.
+    static const bool allowed = [] {
+        const char* env = std::getenv("SHADPS4_BB_PRESENT_THREAD");
+        return !(env && env[0] == '0') && !Vulkan::FrameGen::Requested();
+    }();
+    return allowed && presenter && presenter->GetRasterizer().ThreadedRendererActive();
+}
+
+void VideoOutDriver::RunPresenter(std::function<void()> work, bool if_idle) {
+    {
+        std::scoped_lock lock{swap_mutex};
+        const bool queued = swap_busy || !swap_queue.empty();
+        if (queued || UseSwapThread()) {
+            if (if_idle && queued) {
+                return; // redrawing the last frame is pointless while frames are queued
+            }
+            swap_queue.push_back(std::move(work));
+            swap_cv.notify_one();
+            return;
+        }
+    }
+    work();
+}
+
+void VideoOutDriver::SwapThread(std::stop_token token) {
+    Common::SetCurrentThreadName("shadPS4:SwapThread");
+    while (true) {
+        std::function<void()> work;
+        {
+            std::unique_lock lock{swap_mutex};
+            swap_busy = false;
+            if (!swap_cv.wait(lock, token, [this] { return !swap_queue.empty(); })) {
+                return;
+            }
+            work = std::move(swap_queue.front());
+            swap_queue.pop_front();
+            swap_busy = true;
+        }
+        work();
+    }
 }
 
 VideoOutDriver::~VideoOutDriver() = default;
@@ -234,13 +281,13 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 }
 
 void VideoOutDriver::Flip(const Request& req) {
-    // Update HDR status before presenting.
-    presenter->SetHDR(req.port->is_hdr);
-
-    // Present the frame.
-    Vulkan::FrameGen::SetPresentedGameFrame(req.game_frame);
-    Vulkan::FrameGen::TimingScope timing{"flip_present", req.game_frame};
-    presenter->Present(req.frame);
+    // Update HDR status before presenting, then present the frame.
+    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr, game_frame = req.game_frame] {
+        presenter->SetHDR(hdr);
+        Vulkan::FrameGen::SetPresentedGameFrame(game_frame);
+        Vulkan::FrameGen::TimingScope timing{"flip_present", game_frame};
+        presenter->Present(frame);
+    });
 
     // Update flip status.
     auto* port = req.port;
@@ -280,17 +327,25 @@ void VideoOutDriver::Flip(const Request& req) {
 }
 
 void VideoOutDriver::DrawBlankFrame() {
-    const auto empty_frame = presenter->PrepareBlankFrame(true);
-    presenter->Present(empty_frame, false, false);
+    RunPresenter(
+        [this] {
+            const auto empty_frame = presenter->PrepareBlankFrame(true);
+            presenter->Present(empty_frame, false, false);
+        },
+        true);
 }
 
 void VideoOutDriver::DrawLastFrame() {
     if (Vulkan::FrameGen::SkipRepeatedFrame())
         return;
-    const auto frame = presenter->PrepareLastFrame();
-    if (frame != nullptr) {
-        presenter->Present(frame, true);
-    }
+    RunPresenter(
+        [this] {
+            const auto frame = presenter->PrepareLastFrame();
+            if (frame != nullptr) {
+                presenter->Present(frame, true);
+            }
+        },
+        true);
 }
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,

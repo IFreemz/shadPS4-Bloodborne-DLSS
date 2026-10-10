@@ -22,6 +22,9 @@
 #elif defined(_WIN32)
 #include <windows.h>
 #include "common/string_util.h"
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 #else
 #if defined(__Bitrig__) || defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <pthread_np.h>
@@ -112,19 +115,38 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
 
 bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanoseconds* remaining,
                    const bool interruptible) {
-    const auto begin_sleep = std::chrono::high_resolution_clock::now();
-
-    LARGE_INTEGER interval{
-        .QuadPart = -1 * (duration.count() / 100u),
-    };
-    HANDLE timer = ::CreateWaitableTimer(NULL, TRUE, NULL);
-    SetWaitableTimer(timer, &interval, 0, NULL, NULL, 0);
-    const auto ret = WaitForSingleObjectEx(timer, INFINITE, interruptible);
-    ::CloseHandle(timer);
-
+    const auto begin_sleep = std::chrono::steady_clock::now();
+    DWORD ret = WAIT_OBJECT_0;
+    if (duration.count() <= 0) {
+        // A zero sleep is a yield.
+        SwitchToThread();
+    } else {
+        // One timer per thread, high resolution where available (Windows 10 1803+): a plain
+        // waitable timer rounds up to the system timer period (1 ms at best), so a guest
+        // usleep(100) took 1-2 ms. Creating a timer per call also cost two system calls.
+        thread_local HANDLE timer = [] {
+            HANDLE handle = CreateWaitableTimerExW(nullptr, nullptr,
+                                                   CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                   TIMER_ALL_ACCESS);
+            if (!handle) {
+                handle = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+            }
+            return handle;
+        }();
+        LARGE_INTEGER interval{
+            .QuadPart = -std::max<LONGLONG>(1, (duration.count() + 99) / 100),
+        };
+        if (timer && SetWaitableTimer(timer, &interval, 0, nullptr, nullptr, FALSE)) {
+            ret = WaitForSingleObjectEx(timer, INFINITE, interruptible);
+        } else {
+            ret = SleepEx(static_cast<DWORD>((duration.count() + 999'999) / 1'000'000),
+                          interruptible) == 0
+                      ? WAIT_OBJECT_0
+                      : WAIT_IO_COMPLETION;
+        }
+    }
+    const auto sleep_time = std::chrono::steady_clock::now() - begin_sleep;
     if (remaining) {
-        const auto end_sleep = std::chrono::high_resolution_clock::now();
-        const auto sleep_time = end_sleep - begin_sleep;
         *remaining = duration > sleep_time ? duration - sleep_time : std::chrono::nanoseconds(0);
     }
     return ret == WAIT_OBJECT_0;
@@ -156,7 +178,7 @@ bool AccurateSleep(const std::chrono::nanoseconds duration, std::chrono::nanosec
         .tv_sec = duration.count() / 1'000'000'000,
         .tv_nsec = duration.count() % 1'000'000'000,
     };
-    timespec remain;
+    timespec remain{};
     int ret;
     while ((ret = nanosleep(&request, &remain)) < 0 && errno == EINTR) {
         if (interruptible) {

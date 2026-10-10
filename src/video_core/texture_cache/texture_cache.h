@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 #include <unordered_set>
 #include <boost/container/small_vector.hpp>
@@ -116,8 +117,21 @@ public:
 
     /// Updates image contents if it was modified by CPU.
     void UpdateImage(ImageId image_id) {
-        std::scoped_lock lk{mutex};
         Image& image = slot_images[image_id];
+        // Fast path (after bbport): a clean, registered image whose whole range is tracked has
+        // nothing to refresh or track; skip the lock that guest fault handlers contend for.
+        // A write fault racing with this check is equivalent to one arriving just after it.
+        {
+            const auto flags = std::atomic_ref<ImageFlagBits>(image.flags).load(
+                std::memory_order_acquire);
+            if (False(flags & ImageFlagBits::Dirty) && True(flags & ImageFlagBits::Registered) &&
+                image.track_addr == image.info.guest_address &&
+                image.track_addr_end == image.info.guest_address + image.info.guest_size) {
+                TouchImage(image);
+                return;
+            }
+        }
+        std::scoped_lock lk{mutex};
         TrackImage(image_id);
         TouchImage(image);
         RefreshImage(image);
@@ -149,6 +163,30 @@ public:
         auto& image = slot_images[id];
         TouchImage(image);
         return image;
+    }
+
+    /// Changes whenever an image is registered or unregistered: FindImage results remembered
+    /// at one generation hold as long as it stays the same (threaded renderer memos).
+    [[nodiscard]] u64 RegistryGeneration() const noexcept {
+        return registry_generation.load(std::memory_order_acquire);
+    }
+
+    /// Changes whenever samplers are destroyed: remembered sampler handles hold while it stays.
+    [[nodiscard]] u64 SamplerGeneration() const noexcept {
+        return sampler_generation.load(std::memory_order_acquire);
+    }
+    /// The garbage collection tick (samplers and images not touched for a while are destroyed).
+    [[nodiscard]] u64 GcTick() const noexcept {
+        return gc_tick;
+    }
+    /// GetSampler's LRU touch for a remembered sampler; once per GC tick is enough.
+    void TouchSampler(const AmdGpu::Sampler& sampler, bool is_depth);
+
+    /// FindImage's bookkeeping for an image found through such a memo.
+    void TouchFoundImage(ImageId id) {
+        auto& image = slot_images[id];
+        image.tick_accessed_last = scheduler.CurrentTick();
+        TouchImage(image);
     }
 
     /// Returns the image if the slot still holds the same image (uid), without refreshing it.
@@ -362,6 +400,8 @@ private:
     const bool readback_linear_images;
     PageTable page_table;
     std::mutex mutex;
+    std::atomic<u64> registry_generation{0};
+    std::atomic<u64> sampler_generation{0};
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;
     struct MetaDataInfo {

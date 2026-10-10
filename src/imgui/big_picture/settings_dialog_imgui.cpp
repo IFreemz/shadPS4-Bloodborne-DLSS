@@ -61,6 +61,10 @@ void SettingsWindow::LoadSettings(std::string profile) {
     fsrEnabledSetting = EmulatorSettings.IsFsrEnabled();
     rcasEnabledSetting = EmulatorSettings.IsRcasEnabled();
     rcasAttenuationSetting = static_cast<float>(EmulatorSettings.GetRcasAttenuation() * 0.001f);
+    threadedRendererSetting = EmulatorSettings.IsThreadedRenderer();
+    threadedRendererDiagnosticsSetting = EmulatorSettings.IsThreadedRendererDiagnostics();
+    threadedRendererGpuProfileSetting = EmulatorSettings.IsThreadedRendererGpuProfile();
+    bbObjectMotionSetting = EmulatorSettings.IsBbObjectMotion();
 
     /////////// Input Tab
     motionControlsSetting = EmulatorSettings.IsMotionControlsEnabled();
@@ -118,6 +122,10 @@ void SettingsWindow::SaveSettings(std::string profile) {
     EmulatorSettings.SetRcasEnabled(rcasEnabledSetting, isSpecific);
     EmulatorSettings.SetRcasAttenuation(static_cast<int>(rcasAttenuationSetting * 1000),
                                         isSpecific);
+    EmulatorSettings.SetThreadedRenderer(threadedRendererSetting, isSpecific);
+    EmulatorSettings.SetThreadedRendererDiagnostics(threadedRendererDiagnosticsSetting, isSpecific);
+    EmulatorSettings.SetThreadedRendererGpuProfile(threadedRendererGpuProfileSetting, isSpecific);
+    EmulatorSettings.SetBbObjectMotion(bbObjectMotionSetting, isSpecific);
 
     /////////// Input Tab
     EmulatorSettings.SetMotionControlsEnabled(motionControlsSetting, isSpecific);
@@ -708,6 +716,13 @@ void SettingsWindow::DrawSettingsTable(SettingsCategory category) {
             if (rcasEnabledSetting && fsrEnabledSetting) {
                 AddSettingSliderFloat("RCAS Attenuation", rcasAttenuationSetting, 0.0f, 3.0f, 3);
             }
+
+            AddSettingCheckbox("Threaded Renderer (Bloodborne)", threadedRendererSetting);
+            AddSettingCheckbox("Threaded Renderer: diagnostics in the log",
+                               threadedRendererDiagnosticsSetting);
+            AddSettingCheckbox("Threaded Renderer: GPU time per pass in the log",
+                               threadedRendererGpuProfileSetting);
+            AddSettingCheckbox("Upscaler object motion (velocity mirror)", bbObjectMotionSetting);
 
             ImGui::EndTable();
         }

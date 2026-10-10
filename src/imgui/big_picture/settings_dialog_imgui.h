@@ -134,6 +134,10 @@ private:
     int windowHeightSetting;
     bool hdrAllowedSetting;
     bool fsrEnabledSetting;
+    bool threadedRendererSetting;
+    bool threadedRendererDiagnosticsSetting;
+    bool threadedRendererGpuProfileSetting;
+    bool bbObjectMotionSetting;
     bool rcasEnabledSetting;
     float rcasAttenuationSetting;
 

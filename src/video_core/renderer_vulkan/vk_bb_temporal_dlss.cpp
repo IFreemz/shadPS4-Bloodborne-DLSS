@@ -24,6 +24,7 @@
 #include "video_core/host_shaders/bb_dlss_motion_comp.h"
 #include "video_core/host_shaders/bb_dlss_sharpen_hdr_comp.h"
 #include "video_core/host_shaders/bb_hudless_dim_comp.h"
+#include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_bb_resolution.h"
 #include "video_core/renderer_vulkan/vk_bb_temporal_dlss.h"
 #include "video_core/renderer_vulkan/vk_bb_velocity_mirror.h"
@@ -1006,6 +1007,9 @@ bool BbTemporalDlss::Impl::RunDlss(const Instance& instance, Runtime& runtime, S
                                    VideoCore::TextureCache& cache, BbVelocityMirror& mirror,
                                    VideoCore::Image& source, bool pre_hud,
                                    std::optional<vk::Extent2D> upscale_to) {
+    if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(&scheduler)) {
+        profiler->Mark(0xD155ull, [] { return std::string{"DLSS (temporal upscale and passes)"}; });
+    }
     const bool hdr = upscale_to.has_value();
     auto* ngx = instance.GetDlssNgx();
     const vk::Extent2D in{source.info.size.width, source.info.size.height};

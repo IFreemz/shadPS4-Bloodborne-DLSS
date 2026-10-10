@@ -43,6 +43,11 @@ class BufferCache {
     static constexpr u64 STREAM_THRESHOLD = 16_KB;
 
 public:
+    /// Read-only buffers up to this size are copied into the stream buffer on every binding.
+    static constexpr u64 StreamThreshold() {
+        return STREAM_THRESHOLD;
+    }
+
     explicit BufferCache(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
                          Vulkan::Runtime& runtime, AmdGpu::Liverpool* liverpool,
                          TextureCache& texture_cache, PageManager& tracker);
@@ -77,6 +82,10 @@ public:
 
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
+
+    /// After a guest write fault at device_addr: also unprotects the rest of the aligned
+    /// window around it (see RegionManager::ExtendWriteFault).
+    void ExtendWriteFault(VAddr device_addr);
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false);

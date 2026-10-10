@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <magic_enum/magic_enum.hpp>
 
+#include "common/guest_stats.h"
 #include "common/alignment.h"
 #include "core/debug_state.h"
 #include "core/memory.h"
@@ -99,6 +100,15 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         ReadMemory(device_addr, size, true, assume_locks);
     });
+}
+
+void BufferCache::ExtendWriteFault(VAddr device_addr) {
+    // The game fills its per-frame buffers page after page, and every 4 KiB page cost one
+    // protection fault. bbport measured ~7x fewer faults and +22% FPS with a 64 KiB window,
+    // and halved the faults again with 256 KiB.
+    constexpr u64 FaultWindow = 256_KB;
+    static_assert(HIGHER_PAGE_SIZE % FaultWindow == 0);
+    memory_tracker->ExtendWriteFault(Common::AlignDown(device_addr, FaultWindow), FaultWindow);
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
@@ -308,6 +318,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         resident_ranges.Add(backing);
 
         LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
+        Common::GuestStats::arena_binds.fetch_add(1, std::memory_order_relaxed);
 
         const auto& bind = binds->binds.emplace_back(vk::SparseMemoryBind{
             .resourceOffset = (range.start << block_shift) - arena->cpu_addr,
